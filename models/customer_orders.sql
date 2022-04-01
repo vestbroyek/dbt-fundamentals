@@ -11,19 +11,19 @@ orders as (
         status as order_status,
 
     from 
-        {{ ref('jaffle_shop', 'orders') }}
+        {{ source('jaffle_shop', 'orders') }}
 
 ),
 
 customers as (
 
-    select * from {{ ref('jaffle_shop', 'customers') }}
+    select * from {{ source('jaffle_shop', 'customers') }}
 
 ),
 
 payments as (
 
-    select * from {{ ref('stripe', 'payment') }}
+    select * from {{ source('stripe', 'payment') }}
 
 ),
 
@@ -69,7 +69,13 @@ paid_orders as (
         id as order_id,
         user_id as customer_id,
         order_date as order_placed_at,
-        status as order_status
+        status as order_status,
+
+        total_paid.payment_finalized_date,
+        total_paid.total_amount_paid,
+
+        customers.first_name as customer_first_name,
+        customers.last_name as customer_last_name
 
     from orders
 
@@ -81,49 +87,50 @@ paid_orders as (
 
 ),
 
--- Happy with paid_orders
--- Happy wtih customer_orders
--- Have the below left to do
+intermediate_clv as (
 
-
-select
-
-    paid_orders.*,
-    row_number() over (order by paid_orders.order_id) as transaction_seq,
-    row_number() over (partition by customer_id order by paid_orders.order_id) as customer_sales_seq,
-    case    
-        when customer_orders.first_order_date = paid_orders.order_placed_at
-        then 'new'
-        else 'return' 
-    end as nvsr,
-
-    x.clv_bad as customer_lifetime_value,
-    customer_orders.first_order_date as fdos
-
-from 
-    {{ ref('paid_orders') }} as paid_orders
-
-left join customer_orders using (customer_id)
-
-left outer join 
-(
     select
 
-        paid_orders.order_id,
-        sum(t2.total_amount_paid) as clv_bad
+        order_id,
+        sum(total_amount_paid) as clv
 
     from paid_orders
-
-    left join paid_orders t2 
-        on paid_orders.customer_id = t2.customer_id and paid_orders.order_id >= t2.order_id
 
     group by 1
 
     order by paid_orders.order_id
 
-) as x on x.order_id = paid_orders.order_id
+),
 
-order by order_id
+final as (
+    
+    select
 
+        paid_orders.*,
+        row_number() over (order by paid_orders.order_id) as transaction_seq,
+        row_number() over (partition by customer_id order by paid_orders.order_id) as customer_sales_seq,
 
+        case    
+            when customer_orders.first_order_date = paid_orders.order_placed_at 
+            then 'new'
+            else 'return' 
+        end as new_or_returning_customer,
 
+        intermediate_clv.clv as customer_lifetime_value,
+        customer_orders.first_order_date as first_order_date
+
+    from 
+        paid_orders
+
+    left join 
+        customer_orders 
+    on customer_orders.customer_id
+
+    left join 
+        intermediate_clv
+    on intermediate_clv.order_id = paid_orders.order_id
+
+    order by order_id
+)
+
+select * from final
